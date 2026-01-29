@@ -103,8 +103,11 @@ def main():
     print("\n[6] Seeking to 1 hour ago...")
     try:
         timestamp_ms = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
-        response = image_client.goto(timestamp_ms)
-        print(f"    ✓ Goto response: {response}")
+        headers, _ = image_client.goto(timestamp_ms)
+        # Only show key headers, not binary data
+        print(f"    ✓ Goto succeeded")
+        print(f"    Current timestamp: {headers.get('Current', 'N/A')}")
+        print(f"    Content-length: {headers.get('Content-length', 'N/A')}")
     except Exception as e:
         print(f"    ✗ Goto failed: {e}")
 
@@ -114,9 +117,10 @@ def main():
         headers, jpeg_data = image_client.next_frame()
         if jpeg_data:
             print(f"    ✓ Got frame: {len(jpeg_data)} bytes")
-            print(f"    Headers: {headers}")
+            print(f"    Current timestamp: {headers.get('Current', 'N/A')}")
+            print(f"    Content-type: {headers.get('Content-type', 'N/A')}")
         else:
-            print(f"    No frame data (headers: {headers})")
+            print(f"    No frame data")
     except Exception as e:
         print(f"    ✗ Failed to get frame: {e}")
 

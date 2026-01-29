@@ -53,7 +53,8 @@ class ImageServerClient:
             if not chunk:
                 raise ConnectionError("Connection closed by server")
             data += chunk
-        logger.debug("Received response: %r", data[:500])
+        # Only log first 200 bytes to avoid huge binary dumps
+        logger.debug("Received response: %r", data[:200])
         return data
 
     def _parse_headers(self, header_block: bytes) -> dict:
@@ -132,15 +133,17 @@ class ImageServerClient:
         self.connected = True
         return result
 
-    def goto(self, timestamp_ms: int) -> dict:
+    def goto(self, timestamp_ms: int) -> tuple[dict, bytes]:
         """
-        Seek to a specific timestamp.
+        Seek to a specific timestamp and retrieve the frame at that time.
 
         Args:
             timestamp_ms: Unix timestamp in milliseconds
 
         Returns:
-            Response headers from server
+            Tuple of (headers, image_data)
+            - headers includes 'Current' (timestamp) and 'Content-length'
+            - image_data is the raw frame bytes
         """
         if not self.connected:
             raise RuntimeError("Not connected. Call connect() first.")
@@ -150,11 +153,35 @@ class ImageServerClient:
 
         self._send_xml(goto_xml)
 
-        # Receive response headers
+        # Receive headers (goto returns image data like next_frame)
         response = self._recv_until(b"\r\n\r\n")
-        headers = self._parse_headers(response)
 
-        return headers
+        # Split at delimiter to separate headers from any data that came with it
+        header_end = response.find(b"\r\n\r\n")
+        header_block = response[:header_end]
+        extra_data = response[header_end + 4:]
+
+        headers = self._parse_headers(header_block)
+
+        # Check for end of stream or error
+        if "Content-length" not in headers:
+            return headers, b""
+
+        content_length = int(headers["Content-length"])
+
+        if content_length == 0:
+            return headers, b""
+
+        # Read the image data
+        image_data = extra_data
+        while len(image_data) < content_length:
+            remaining = content_length - len(image_data)
+            chunk = self.sock.recv(min(remaining, 65536))
+            if not chunk:
+                raise ConnectionError("Connection closed while reading frame data")
+            image_data += chunk
+
+        return headers, image_data[:content_length]
 
     def next_frame(self) -> tuple[dict, bytes]:
         """
