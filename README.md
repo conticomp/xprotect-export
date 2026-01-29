@@ -31,7 +31,9 @@ This code is intended as a starting point for developers integrating with Milest
 - Two-token authentication flow (OAuth + SOAP Login for ImageServer)
 - Camera listing via REST API
 - Browser-based UI for selecting camera and time range
-- Video export to MP4 via ImageServer protocol + FFmpeg
+- **Raw H.264 export** - Near-instant exports using native codec passthrough (~3.8x smaller than JPEG)
+- Request pipelining for high-throughput frame retrieval
+- Auto-detection of codec format with JPEG fallback
 
 ## Requirements
 
@@ -105,11 +107,13 @@ Open http://localhost:8000 in your browser.
                         ┌──────────────┐         ┌─────────────┐
                         │ image_       │────────▶│ ImageServer │
                         │ server.py    │  TCP    │ (Port 7563) │
+                        │ (pipelined)  │ raw H264│             │
                         └──────────────┘         └─────────────┘
                                │
                                ▼
                         ┌──────────────┐
                         │   FFmpeg     │────▶ MP4 file
+                        │  (-c:v copy) │  (no transcode)
                         └──────────────┘
 ```
 
@@ -119,10 +123,11 @@ Open http://localhost:8000 in your browser.
 |------|---------|
 | `main.py` | FastAPI application with REST endpoints |
 | `milestone_client.py` | REST API + SOAP client for authentication |
-| `image_server.py` | ImageServer TCP protocol client |
+| `image_server.py` | ImageServer TCP protocol client (raw H.264 + pipelining) |
 | `config.py` | Environment variable configuration |
 | `static/index.html` | Browser UI |
-| `MILESTONE_SDK_REFERENCE.md` | Comprehensive SDK documentation |
+| `scripts/` | Test and utility scripts |
+| `docs/MILESTONE_SDK_REFERENCE.md` | Comprehensive SDK documentation |
 
 ## API Endpoints
 
@@ -157,16 +162,16 @@ XProtect requires **two different tokens** for full functionality:
    - Format: `TOKEN#guid#hostname//ServerConnector#...`
    - Obtained by calling `/ManagementServer/ServerCommandServiceOAuth.svc`
 
-See `MILESTONE_SDK_REFERENCE.md` for detailed documentation.
+See `docs/MILESTONE_SDK_REFERENCE.md` for detailed documentation.
 
 ## Testing
 
 ```bash
-# Test ImageServer connection
-python test_imageserver.py
+# Test raw codec mode (verifies H.264 vs JPEG detection)
+python scripts/test_raw_codec.py
 
-# Test specific time range export
-python test_export.py
+# Test ImageServer connection
+python scripts/test_imageserver.py
 ```
 
 ## Troubleshooting
@@ -175,10 +180,16 @@ python test_export.py
 You're using the OAuth token instead of the ImageServer token. The ImageServer requires a token obtained via SOAP Login, not the OAuth JWT.
 
 ### No video data / empty frames
-Ensure `<alwaysstdjpeg>yes</alwaysstdjpeg>` is included in the connect request. Without this, the server returns raw H.264 data instead of JPEG frames.
+Check that the camera has recorded video at the requested time range. Use the XProtect Smart Client to verify recordings exist.
+
+### Export produces corrupt video
+The application auto-detects whether the server returns raw H.264 or JPEG. If detection fails, check the server logs for "Unknown frame format" warnings. Some older cameras may not support raw codec output.
 
 ### Frames work once then stop
 The ImageServer sends a trailing `\r\n\r\n` after each frame's binary data. This must be consumed before sending the next request.
+
+### Slow exports
+Ensure raw H.264 mode is active (check logs for "Detected video format: h264"). JPEG mode requires transcoding and is significantly slower. Raw H.264 exports should be near-instant.
 
 ## References
 

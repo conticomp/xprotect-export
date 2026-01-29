@@ -645,9 +645,9 @@ When using `<alwaysstdjpeg>no</alwaysstdjpeg>`, Milestone wraps the raw H.264 da
 ```
 Offset  Size  Description
 ------  ----  -----------
-0-1     2     Codec type (little-endian): 0x000A = H.264/AVC
+0-1     2     Codec type (big-endian): 0x000A = H.264/AVC
 2-7     6     Reserved/unknown
-8-11    4     Payload length (little-endian)
+8-11    4     Payload length
 12-19   8     Timestamps
 20-35   16    Reserved/metadata
 36+     N     H.264 NAL units (Annex B format with 00 00 00 01 start codes)
@@ -675,9 +675,9 @@ def strip_milestone_header(data: bytes) -> bytes:
     if len(data) <= MILESTONE_HEADER_SIZE:
         return data
 
-    # Verify codec type
+    # Verify codec type (big-endian)
     import struct
-    codec_id = struct.unpack('<H', data[0:2])[0]
+    codec_id = struct.unpack('>H', data[0:2])[0]
     if codec_id != H264_CODEC_ID:
         raise ValueError(f"Unexpected codec: 0x{codec_id:04X}")
 
