@@ -131,26 +131,53 @@ async def export_video(request: ExportRequest):
         output_filename = f"export_{timestamp}.mp4"
         output_path = EXPORTS_DIR / output_filename
 
-        # Connect to ImageServer
-        image_client = ImageServerClient()
+        # Try raw codec mode first for better performance
+        # Raw H.264 is ~3.8x smaller than JPEG and requires no transcoding
+        # But fall back to JPEG if server doesn't provide raw H.264
+        image_client = ImageServerClient(force_jpeg=False)
         try:
             image_client.connect(host, port, request.camera_id, token)
 
-            # Seek to start time
-            image_client.goto(start_ms)
+            # Seek to start time and get first frame to detect format
+            first_headers, first_data = image_client.goto(start_ms)
 
-            # Start FFmpeg process
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-y",  # Overwrite output
-                "-f", "image2pipe",
-                "-framerate", "15",
-                "-i", "-",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-preset", "fast",
-                str(output_path)
-            ]
+            if not first_data:
+                return ExportResponse(
+                    success=False,
+                    error="No video data at the specified start time"
+                )
+
+            # Detect actual format from first frame
+            processed_data, detected_format = image_client.strip_milestone_header(first_data)
+            logging.info(f"Detected video format: {detected_format}")
+
+            # Configure FFmpeg based on detected format
+            if detected_format == 'h264':
+                # Raw H.264 mode - no transcoding needed
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-f", "h264",           # Input is raw H.264 Annex B
+                    "-i", "-",
+                    "-c:v", "copy",         # No transcoding - just mux
+                    "-movflags", "+faststart",
+                    str(output_path)
+                ]
+            else:
+                # JPEG mode - need to decode and re-encode
+                logging.info("Server returned JPEG, using JPEG pipeline with transcoding")
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-f", "image2pipe",
+                    "-framerate", "15",
+                    "-i", "-",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", "fast",
+                    "-movflags", "+faststart",
+                    str(output_path)
+                ]
 
             ffmpeg_proc = subprocess.Popen(
                 ffmpeg_cmd,
@@ -163,24 +190,25 @@ async def export_video(request: ExportRequest):
             last_timestamp = None
 
             try:
-                while True:
-                    headers, jpeg_data = image_client.next_frame()
+                # Write the first frame we already have
+                ffmpeg_proc.stdin.write(processed_data)
+                frame_count += 1
+                last_timestamp = image_client.get_frame_timestamp(first_headers)
 
-                    if not jpeg_data:
-                        # No more frames
+                # Use pipelined fetching for remaining frames
+                for headers, raw_data in image_client.fetch_frames_pipelined(end_ms):
+                    if not raw_data:
                         break
 
                     frame_timestamp = image_client.get_frame_timestamp(headers)
-
                     if frame_timestamp is None:
                         continue
 
-                    # Check if we've passed the end time
-                    if frame_timestamp >= end_ms:
-                        break
+                    # Process frame data (strips header if present, returns raw codec/jpeg)
+                    frame_data, _ = image_client.strip_milestone_header(raw_data)
 
-                    # Write frame to FFmpeg
-                    ffmpeg_proc.stdin.write(jpeg_data)
+                    # Write to FFmpeg
+                    ffmpeg_proc.stdin.write(frame_data)
                     frame_count += 1
                     last_timestamp = frame_timestamp
 

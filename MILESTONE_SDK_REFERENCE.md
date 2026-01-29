@@ -616,6 +616,109 @@ RequestId: 2
 </methodcall>
 ```
 
+### Raw Codec Mode vs JPEG Mode
+
+The ImageServer can return video data in two formats controlled by the `<alwaysstdjpeg>` element:
+
+| Mode | Setting | Content-Type | Use Case |
+|------|---------|--------------|----------|
+| **JPEG** | `<alwaysstdjpeg>yes</alwaysstdjpeg>` | `image/jpeg` | Simple display, frame-by-frame viewing |
+| **Raw Codec** | `<alwaysstdjpeg>no</alwaysstdjpeg>` | `application/x-genericbytedata-octet-stream` | High-performance export |
+
+#### Performance Comparison
+
+| Metric | JPEG Mode | Raw Codec Mode |
+|--------|-----------|----------------|
+| Frame size (4K) | ~5.3 MB | ~1.3 MB |
+| Server CPU | High (transcode) | Low (passthrough) |
+| Network transfer (2 min @ 15fps) | ~9.5 GB | ~2.5 GB |
+| FFmpeg work | Decode JPEG + encode H.264 | Mux only (`-c:v copy`) |
+
+**Recommendation**: Use raw codec mode (`alwaysstdjpeg=no`) for video export to reduce transfer size by ~75% and eliminate transcoding overhead.
+
+> **Note**: Some camera/server configurations may still return JPEG even with `alwaysstdjpeg=no`. Always detect the actual format from the first frame and fall back to JPEG processing if needed. Check for JPEG signature (`FF D8 FF`) at the start of frame data.
+
+### Raw Codec Data Format (Milestone Proprietary Header)
+
+When using `<alwaysstdjpeg>no</alwaysstdjpeg>`, Milestone wraps the raw H.264 data in a 36-byte proprietary header:
+
+```
+Offset  Size  Description
+------  ----  -----------
+0-1     2     Codec type (little-endian): 0x000A = H.264/AVC
+2-7     6     Reserved/unknown
+8-11    4     Payload length (little-endian)
+12-19   8     Timestamps
+20-35   16    Reserved/metadata
+36+     N     H.264 NAL units (Annex B format with 00 00 00 01 start codes)
+```
+
+#### Codec Type Values
+
+| Value | Codec |
+|-------|-------|
+| 0x0001 | MJPEG |
+| 0x000A | H.264/AVC |
+| 0x000E | H.265/HEVC |
+| 0x000F | AV1 |
+
+#### Extracting Raw H.264
+
+To get raw H.264 NAL units from Milestone's response:
+
+```python
+MILESTONE_HEADER_SIZE = 36
+H264_CODEC_ID = 0x000A
+
+def strip_milestone_header(data: bytes) -> bytes:
+    """Strip 36-byte Milestone header to get raw H.264 NAL units."""
+    if len(data) <= MILESTONE_HEADER_SIZE:
+        return data
+
+    # Verify codec type
+    import struct
+    codec_id = struct.unpack('<H', data[0:2])[0]
+    if codec_id != H264_CODEC_ID:
+        raise ValueError(f"Unexpected codec: 0x{codec_id:04X}")
+
+    return data[MILESTONE_HEADER_SIZE:]
+```
+
+#### FFmpeg Integration (No Transcoding)
+
+Feed the stripped H.264 data directly to FFmpeg for muxing without re-encoding:
+
+```bash
+# Mux raw H.264 to MP4 (no transcoding)
+ffmpeg -f h264 -i - -c:v copy -movflags +faststart output.mp4
+```
+
+Python example:
+
+```python
+import subprocess
+
+# Start FFmpeg in raw H.264 mode
+ffmpeg_cmd = [
+    "ffmpeg", "-y",
+    "-f", "h264",           # Input is raw H.264 Annex B
+    "-i", "-",              # Read from stdin
+    "-c:v", "copy",         # No transcoding - just mux
+    "-movflags", "+faststart",
+    "output.mp4"
+]
+
+proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+
+# For each frame from ImageServer (raw codec mode)
+for headers, raw_data in image_client.fetch_frames():
+    h264_data = strip_milestone_header(raw_data)
+    proc.stdin.write(h264_data)
+
+proc.stdin.close()
+proc.wait()
+```
+
 ---
 
 ## WebRTC for Browser Streaming
