@@ -113,10 +113,12 @@ class ImageServerClient:
 
         # Build connect XML (single-line per Milestone docs)
         # Note: username/password are dummy - actual auth is via connectiontoken
+        # Request JPEG format with alwaysstdjpeg=yes
         connect_xml = self._build_xml(
             'connect',
             username='dummy',
             password='dummy',
+            alwaysstdjpeg='yes',
             connectparam=f'id={camera_id}&amp;connectiontoken={token}'
         )
 
@@ -181,6 +183,17 @@ class ImageServerClient:
                 raise ConnectionError("Connection closed while reading frame data")
             image_data += chunk
 
+        # Consume trailing terminator if present (ImageServer sends \r\n\r\n after data)
+        # Read any remaining data that might include the terminator
+        self.sock.setblocking(False)
+        try:
+            trailing = self.sock.recv(4)
+            logger.debug("Consumed trailing data: %r", trailing)
+        except BlockingIOError:
+            pass  # No trailing data available
+        finally:
+            self.sock.setblocking(True)
+
         return headers, image_data[:content_length]
 
     def next_frame(self) -> tuple[dict, bytes]:
@@ -228,6 +241,16 @@ class ImageServerClient:
             if not chunk:
                 raise ConnectionError("Connection closed while reading frame data")
             jpeg_data += chunk
+
+        # Consume trailing terminator if present (ImageServer sends \r\n\r\n after data)
+        self.sock.setblocking(False)
+        try:
+            trailing = self.sock.recv(4)
+            logger.debug("Consumed trailing data: %r", trailing)
+        except BlockingIOError:
+            pass  # No trailing data available
+        finally:
+            self.sock.setblocking(True)
 
         return headers, jpeg_data[:content_length]
 
