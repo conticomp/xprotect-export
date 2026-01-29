@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Milestone Video Export</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            background: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #444;
+        }
+        select, input[type="datetime-local"] {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 16px;
+            background: white;
+        }
+        select:focus, input:focus {
+            outline: none;
+            border-color: #0066cc;
+            box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: #0066cc;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover:not(:disabled) {
+            background: #0052a3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 20px;
+            padding: 16px;
+            border-radius: 6px;
+            display: none;
+        }
+        .status.info {
+            display: block;
+            background: #e7f3ff;
+            color: #0066cc;
+            border: 1px solid #b3d9ff;
+        }
+        .status.success {
+            display: block;
+            background: #e6f4ea;
+            color: #1e7e34;
+            border: 1px solid #b7e4c7;
+        }
+        .status.error {
+            display: block;
+            background: #fce8e8;
+            color: #c62828;
+            border: 1px solid #f5c6cb;
+        }
+        .download-link {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 10px 20px;
+            background: #1e7e34;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+        }
+        .download-link:hover {
+            background: #166528;
+        }
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #ffffff;
+            border-radius: 50%;
+            border-top-color: transparent;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .note {
+            font-size: 14px;
+            color: #666;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Milestone Video Export</h1>
+
+    <div class="form-group">
+        <label for="camera">Camera</label>
+        <select id="camera" disabled>
+            <option value="">Loading cameras...</option>
+        </select>
+    </div>
+
+    <div class="form-group">
+        <label for="startTime">Start Time</label>
+        <input type="datetime-local" id="startTime">
+    </div>
+
+    <div class="form-group">
+        <label for="endTime">End Time</label>
+        <input type="datetime-local" id="endTime">
+        <p class="note">Maximum duration: 10 minutes</p>
+    </div>
+
+    <button id="exportBtn" disabled>Export Video</button>
+
+    <div id="status" class="status"></div>
+
+    <script>
+        const cameraSelect = document.getElementById('camera');
+        const startTimeInput = document.getElementById('startTime');
+        const endTimeInput = document.getElementById('endTime');
+        const exportBtn = document.getElementById('exportBtn');
+        const statusDiv = document.getElementById('status');
+
+        // Set default times (last hour)
+        const now = new Date();
+        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+        const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000);
+
+        function formatDatetimeLocal(date) {
+            return date.toISOString().slice(0, 16);
+        }
+
+        startTimeInput.value = formatDatetimeLocal(oneHourAgo);
+        endTimeInput.value = formatDatetimeLocal(fiveMinutesAgo);
+
+        // Load cameras on page load
+        async function loadCameras() {
+            try {
+                const response = await fetch('/api/cameras');
+                if (!response.ok) throw new Error('Failed to load cameras');
+
+                const data = await response.json();
+                cameraSelect.innerHTML = '<option value="">Select a camera...</option>';
+
+                for (const camera of data.cameras) {
+                    if (camera.enabled) {
+                        const option = document.createElement('option');
+                        option.value = camera.id;
+                        option.textContent = camera.displayName || camera.name;
+                        cameraSelect.appendChild(option);
+                    }
+                }
+
+                cameraSelect.disabled = false;
+                exportBtn.disabled = false;
+            } catch (error) {
+                showStatus('error', `Failed to load cameras: ${error.message}`);
+            }
+        }
+
+        function showStatus(type, message, downloadUrl = null) {
+            statusDiv.className = `status ${type}`;
+            if (downloadUrl) {
+                statusDiv.innerHTML = `${message}<br><a class="download-link" href="${downloadUrl}" download>Download MP4</a>`;
+            } else {
+                statusDiv.textContent = message;
+            }
+        }
+
+        async function exportVideo() {
+            const cameraId = cameraSelect.value;
+            const startTime = startTimeInput.value;
+            const endTime = endTimeInput.value;
+
+            if (!cameraId) {
+                showStatus('error', 'Please select a camera');
+                return;
+            }
+
+            if (!startTime || !endTime) {
+                showStatus('error', 'Please select start and end times');
+                return;
+            }
+
+            // Validate duration
+            const startDate = new Date(startTime);
+            const endDate = new Date(endTime);
+            const durationMinutes = (endDate - startDate) / 1000 / 60;
+
+            if (durationMinutes <= 0) {
+                showStatus('error', 'End time must be after start time');
+                return;
+            }
+
+            if (durationMinutes > 10) {
+                showStatus('error', `Duration exceeds 10 minute limit (${durationMinutes.toFixed(1)} minutes)`);
+                return;
+            }
+
+            // Disable button during export
+            exportBtn.disabled = true;
+            exportBtn.innerHTML = '<span class="spinner"></span>Exporting...';
+            showStatus('info', 'Export in progress. This may take a moment...');
+
+            try {
+                const response = await fetch('/api/export', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        camera_id: cameraId,
+                        start_time: new Date(startTime).toISOString(),
+                        end_time: new Date(endTime).toISOString()
+                    })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    showStatus('success', `Export complete: ${result.filename}`, result.download_url);
+                } else {
+                    showStatus('error', result.error || 'Export failed');
+                }
+            } catch (error) {
+                showStatus('error', `Export failed: ${error.message}`);
+            } finally {
+                exportBtn.disabled = false;
+                exportBtn.textContent = 'Export Video';
+            }
+        }
+
+        exportBtn.addEventListener('click', exportVideo);
+
+        // Load cameras when page loads
+        loadCameras();
+    </script>
+</body>
+</html>
