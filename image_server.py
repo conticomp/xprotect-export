@@ -1,7 +1,11 @@
 """ImageServer TCP protocol client for retrieving video frames from Milestone Recording Server."""
 
+import logging
+import re
 import socket
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ImageServerClient:
@@ -12,6 +16,24 @@ class ImageServerClient:
         self.request_id = 0
         self.connected = False
 
+    def _build_xml(self, method: str, **elements) -> str:
+        """
+        Build single-line XML for ImageServer protocol.
+
+        Milestone docs state: "Requests should be sent without linebreaks within the XML"
+        """
+        request_id = self._next_request_id()
+        parts = [
+            '<?xml version="1.0" encoding="utf-8"?>',
+            '<methodcall>',
+            f'<requestid>{request_id}</requestid>',
+            f'<methodname>{method}</methodname>',
+        ]
+        for key, value in elements.items():
+            parts.append(f'<{key}>{value}</{key}>')
+        parts.append('</methodcall>')
+        return ''.join(parts)
+
     def _next_request_id(self) -> int:
         """Increment and return request ID."""
         self.request_id += 1
@@ -20,6 +42,7 @@ class ImageServerClient:
     def _send_xml(self, xml: str) -> None:
         """Send XML message terminated with \\r\\n\\r\\n."""
         message = xml.strip() + "\r\n\r\n"
+        logger.debug("Sending XML: %r", message)
         self.sock.sendall(message.encode("utf-8"))
 
     def _recv_until(self, delimiter: bytes) -> bytes:
@@ -30,6 +53,7 @@ class ImageServerClient:
             if not chunk:
                 raise ConnectionError("Connection closed by server")
             data += chunk
+        logger.debug("Received response: %r", data[:500])
         return data
 
     def _parse_headers(self, header_block: bytes) -> dict:
@@ -45,6 +69,26 @@ class ImageServerClient:
                 headers[key.strip()] = value.strip()
         return headers
 
+    def _parse_xml_response(self, xml_data: bytes) -> dict:
+        """Parse XML response from ImageServer into a dictionary."""
+        text = xml_data.decode("utf-8", errors="ignore")
+        result = {}
+
+        # Extract common XML elements using regex
+        patterns = [
+            (r'<connected>([^<]+)</connected>', 'connected'),
+            (r'<errorreason>([^<]+)</errorreason>', 'errorreason'),
+            (r'<requestid>([^<]+)</requestid>', 'requestid'),
+            (r'<methodname>([^<]+)</methodname>', 'methodname'),
+        ]
+
+        for pattern, key in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                result[key] = match.group(1)
+
+        return result
+
     def connect(self, host: str, port: int, camera_id: str, token: str) -> dict:
         """
         Open socket and send connect XML to establish session.
@@ -53,38 +97,40 @@ class ImageServerClient:
             host: Recording server hostname
             port: ImageServer port (typically 7563)
             camera_id: Camera GUID
-            token: OAuth access token
+            token: ImageServer token from SOAP Login (NOT the OAuth JWT token).
+                   Obtain via MilestoneClient.get_imageserver_token()
 
         Returns:
             Response headers from server
         """
+        logger.debug("Connecting to ImageServer: host=%s, port=%d, camera_id=%s, token=%s...",
+                     host, port, camera_id, token[:20] if len(token) > 20 else token)
+
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.settimeout(30)
         self.sock.connect((host, port))
 
-        # Build connect XML
+        # Build connect XML (single-line per Milestone docs)
         # Note: username/password are dummy - actual auth is via connectiontoken
-        connect_xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<methodcall>
-  <requestid>{self._next_request_id()}</requestid>
-  <methodname>connect</methodname>
-  <username>dummy</username>
-  <password>dummy</password>
-  <connectparam>id={camera_id}&amp;connectiontoken={token}</connectparam>
-</methodcall>"""
+        connect_xml = self._build_xml(
+            'connect',
+            username='dummy',
+            password='dummy',
+            connectparam=f'id={camera_id}&amp;connectiontoken={token}'
+        )
 
         self._send_xml(connect_xml)
 
-        # Receive response
+        # Receive response (XML format)
         response = self._recv_until(b"\r\n\r\n")
-        headers = self._parse_headers(response)
+        result = self._parse_xml_response(response)
 
-        if headers.get("connected", "").lower() != "yes":
-            error = headers.get("errorreason", "Unknown error")
+        if result.get("connected", "").lower() != "yes":
+            error = result.get("errorreason", "Unknown error")
             raise ConnectionError(f"Failed to connect to ImageServer: {error}")
 
         self.connected = True
-        return headers
+        return result
 
     def goto(self, timestamp_ms: int) -> dict:
         """
@@ -99,12 +145,8 @@ class ImageServerClient:
         if not self.connected:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        goto_xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<methodcall>
-  <requestid>{self._next_request_id()}</requestid>
-  <methodname>goto</methodname>
-  <time>{timestamp_ms}</time>
-</methodcall>"""
+        # Build single-line XML per Milestone docs
+        goto_xml = self._build_xml('goto', time=timestamp_ms)
 
         self._send_xml(goto_xml)
 
@@ -126,12 +168,8 @@ class ImageServerClient:
         if not self.connected:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        # Request next frame
-        next_xml = f"""<?xml version="1.0" encoding="utf-8"?>
-<methodcall>
-  <requestid>{self._next_request_id()}</requestid>
-  <methodname>next</methodname>
-</methodcall>"""
+        # Request next frame (single-line XML per Milestone docs)
+        next_xml = self._build_xml('next')
 
         self._send_xml(next_xml)
 

@@ -252,6 +252,98 @@ response = requests.get(
 )
 ```
 
+### Two-Token Authentication (ImageServer Protocol)
+
+> **IMPORTANT**: The ImageServer TCP protocol requires a DIFFERENT token than the OAuth access token used for REST APIs.
+
+XProtect uses two distinct tokens:
+
+| Token Type | Purpose | How to Obtain | Used For |
+|------------|---------|---------------|----------|
+| **OAuth Access Token** | REST API authentication | `/API/IDP/connect/token` | REST APIs, WebRTC, WebSocket |
+| **ImageServer Token** | TCP protocol authentication | SOAP `Login()` call | ImageServer TCP connections |
+
+**Authentication Flow for ImageServer:**
+
+```
+1. Get OAuth token from IDP (as usual)
+2. Call SOAP Login() with OAuth token in header
+3. SOAP returns ImageServer session token
+4. Use ImageServer token for TCP connections
+```
+
+**SOAP Login Request:**
+
+```http
+POST /ManagementServer/ServerCommandServiceOAuth.svc HTTP/1.1
+Content-Type: text/xml; charset=utf-8
+SOAPAction: http://videoos.net/2/XProtectCSServerCommand/IServerCommandService/Login
+Authorization: Bearer {oauth_access_token}
+
+<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:xsc="http://videoos.net/2/XProtectCSServerCommand">
+  <soap:Body>
+    <xsc:Login>
+      <xsc:instanceId>{new-guid}</xsc:instanceId>
+      <xsc:currentToken></xsc:currentToken>
+    </xsc:Login>
+  </soap:Body>
+</soap:Envelope>
+```
+
+**SOAP Login Response:**
+
+```xml
+<LoginResult>
+  <Token>IMAGESERVER_SESSION_TOKEN_HERE</Token>
+  <RegistrationTime>2024-01-15T12:00:00Z</RegistrationTime>
+  <TimeToLive>
+    <MicroSeconds>3600000000</MicroSeconds>
+  </TimeToLive>
+</LoginResult>
+```
+
+**Python Example:**
+
+```python
+import uuid
+import re
+import requests
+
+def get_imageserver_token(base_url, oauth_token):
+    """Get ImageServer token via SOAP Login."""
+    url = f"{base_url}/ManagementServer/ServerCommandServiceOAuth.svc"
+    instance_id = str(uuid.uuid4())
+
+    soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:xsc="http://videoos.net/2/XProtectCSServerCommand">
+  <soap:Body>
+    <xsc:Login>
+      <xsc:instanceId>{instance_id}</xsc:instanceId>
+      <xsc:currentToken></xsc:currentToken>
+    </xsc:Login>
+  </soap:Body>
+</soap:Envelope>'''
+
+    headers = {
+        "Content-Type": "text/xml; charset=utf-8",
+        "SOAPAction": "http://videoos.net/2/XProtectCSServerCommand/IServerCommandService/Login",
+        "Authorization": f"Bearer {oauth_token}"
+    }
+
+    response = requests.post(url, data=soap_envelope, headers=headers, verify=False)
+    response.raise_for_status()
+
+    # Parse token from response
+    token_match = re.search(r'<(?:a:)?Token>([^<]+)</(?:a:)?Token>', response.text)
+    if not token_match:
+        raise RuntimeError("Failed to parse token from SOAP response")
+
+    return token_match.group(1)
+```
+
 ---
 
 ## Available APIs and Protocols
@@ -434,6 +526,8 @@ The ImageServer Protocol is a TCP-based protocol for retrieving video from Recor
 
 ### Connect Request
 
+> **IMPORTANT**: The `connectiontoken` must be an ImageServer token obtained via SOAP `Login()`, NOT the OAuth JWT token. See [Two-Token Authentication](#two-token-authentication-imageserver-protocol) for details.
+
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
 <methodcall>
@@ -441,7 +535,7 @@ The ImageServer Protocol is a TCP-based protocol for retrieving video from Recor
   <methodname>connect</methodname>
   <username>dummy</username>
   <password>dummy</password>
-  <connectparam>id={cameraGuid}&amp;connectiontoken={token}</connectparam>
+  <connectparam>id={cameraGuid}&amp;connectiontoken={imageserver_token}</connectparam>
 </methodcall>
 ```
 
@@ -923,32 +1017,105 @@ for cam in cameras:
 
 ### Python: ImageServer Connection
 
+> **Note**: This example requires TWO tokens - see [Two-Token Authentication](#two-token-authentication-imageserver-protocol).
+
 ```python
 import socket
 import re
+import uuid
+import requests
 from datetime import datetime
 
+class MilestoneAuth:
+    """Handle both OAuth and ImageServer authentication."""
+
+    def __init__(self, server_url, username, password):
+        self.server_url = server_url.rstrip('/')
+        self.username = username
+        self.password = password
+        self.oauth_token = None
+        self.imageserver_token = None
+        self.instance_id = str(uuid.uuid4())
+
+    def authenticate(self):
+        """Get OAuth token from IDP."""
+        url = f"{self.server_url}/API/IDP/connect/token"
+        data = {
+            'grant_type': 'password',
+            'username': self.username,
+            'password': self.password,
+            'client_id': 'GrantValidatorClient'
+        }
+        response = requests.post(url, data=data, verify=False)
+        response.raise_for_status()
+        self.oauth_token = response.json()['access_token']
+        return self.oauth_token
+
+    def get_imageserver_token(self):
+        """Get ImageServer token via SOAP Login."""
+        if not self.oauth_token:
+            raise RuntimeError("Must call authenticate() first")
+
+        url = f"{self.server_url}/ManagementServer/ServerCommandServiceOAuth.svc"
+        soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:xsc="http://videoos.net/2/XProtectCSServerCommand">
+  <soap:Body>
+    <xsc:Login>
+      <xsc:instanceId>{self.instance_id}</xsc:instanceId>
+      <xsc:currentToken></xsc:currentToken>
+    </xsc:Login>
+  </soap:Body>
+</soap:Envelope>'''
+
+        headers = {
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": "http://videoos.net/2/XProtectCSServerCommand/IServerCommandService/Login",
+            "Authorization": f"Bearer {self.oauth_token}"
+        }
+
+        response = requests.post(url, data=soap_envelope, headers=headers, verify=False)
+        response.raise_for_status()
+
+        token_match = re.search(r'<(?:a:)?Token>([^<]+)</(?:a:)?Token>', response.text)
+        if not token_match:
+            raise RuntimeError("Failed to parse token from SOAP response")
+
+        self.imageserver_token = token_match.group(1)
+        return self.imageserver_token
+
+
 class ImageServerClient:
+    """TCP client for ImageServer protocol."""
+
     def __init__(self, host, port=7563):
         self.host = host
         self.port = port
         self.sock = None
         self.request_id = 0
 
-    def connect(self, camera_id, token):
-        """Connect to ImageServer."""
+    def connect(self, camera_id, imageserver_token):
+        """Connect to ImageServer.
+
+        Args:
+            camera_id: Camera GUID
+            imageserver_token: Token from SOAP Login (NOT OAuth token!)
+        """
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
 
         self.request_id += 1
-        request = f'''<?xml version="1.0" encoding="utf-8"?>
-<methodcall>
-  <requestid>{self.request_id}</requestid>
-  <methodname>connect</methodname>
-  <username>dummy</username>
-  <password>dummy</password>
-  <connectparam>id={camera_id}&amp;connectiontoken={token}</connectparam>
-</methodcall>\r\n\r\n'''
+        # Single-line XML per Milestone docs
+        request = (
+            f'<?xml version="1.0" encoding="utf-8"?>'
+            f'<methodcall>'
+            f'<requestid>{self.request_id}</requestid>'
+            f'<methodname>connect</methodname>'
+            f'<username>dummy</username>'
+            f'<password>dummy</password>'
+            f'<connectparam>id={camera_id}&amp;connectiontoken={imageserver_token}</connectparam>'
+            f'</methodcall>\r\n\r\n'
+        )
 
         self.sock.send(request.encode('utf-8'))
         return self._receive_response()
@@ -956,12 +1123,14 @@ class ImageServerClient:
     def goto(self, timestamp_ms):
         """Seek to specific time."""
         self.request_id += 1
-        request = f'''<?xml version="1.0" encoding="utf-8"?>
-<methodcall>
-  <requestid>{self.request_id}</requestid>
-  <methodname>goto</methodname>
-  <time>{timestamp_ms}</time>
-</methodcall>\r\n\r\n'''
+        request = (
+            f'<?xml version="1.0" encoding="utf-8"?>'
+            f'<methodcall>'
+            f'<requestid>{self.request_id}</requestid>'
+            f'<methodname>goto</methodname>'
+            f'<time>{timestamp_ms}</time>'
+            f'</methodcall>\r\n\r\n'
+        )
 
         self.sock.send(request.encode('utf-8'))
         return self._receive_image()
@@ -969,11 +1138,13 @@ class ImageServerClient:
     def next_frame(self):
         """Get next frame."""
         self.request_id += 1
-        request = f'''<?xml version="1.0" encoding="utf-8"?>
-<methodcall>
-  <requestid>{self.request_id}</requestid>
-  <methodname>next</methodname>
-</methodcall>\r\n\r\n'''
+        request = (
+            f'<?xml version="1.0" encoding="utf-8"?>'
+            f'<methodcall>'
+            f'<requestid>{self.request_id}</requestid>'
+            f'<methodname>next</methodname>'
+            f'</methodcall>\r\n\r\n'
+        )
 
         self.sock.send(request.encode('utf-8'))
         return self._receive_image()
@@ -990,7 +1161,6 @@ class ImageServerClient:
 
     def _receive_image(self):
         """Receive image with headers."""
-        # Read headers
         headers = {}
         header_data = b''
         while b'\r\n\r\n' not in header_data:
@@ -1001,7 +1171,6 @@ class ImageServerClient:
                 key, value = line.split(':', 1)
                 headers[key.strip()] = value.strip()
 
-        # Read image data
         content_length = int(headers.get('Content-length', 0))
         image_data = b''
         while len(image_data) < content_length:
@@ -1013,9 +1182,14 @@ class ImageServerClient:
         if self.sock:
             self.sock.close()
 
+
 # Usage
+auth = MilestoneAuth('https://milestone-server.local', 'admin', 'password')
+auth.authenticate()  # Get OAuth token
+imageserver_token = auth.get_imageserver_token()  # Get ImageServer token via SOAP
+
 img_client = ImageServerClient('recorder.example.com')
-img_client.connect(camera_guid, xprotect_token)
+img_client.connect(camera_guid, imageserver_token)  # Use ImageServer token!
 
 # Get frame at specific time
 timestamp_ms = int(datetime(2024, 1, 15, 12, 0, 0).timestamp() * 1000)

@@ -1,13 +1,21 @@
 """FastAPI application for Milestone video export."""
 
+import logging
 import os
 import subprocess
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+
+# Configure logging - set DEBUG level for image_server module
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logging.getLogger('image_server').setLevel(logging.DEBUG)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -115,10 +123,11 @@ async def export_video(request: ExportRequest):
 
         # Get recording server for this camera
         host, port = client.get_camera_recording_server(request.camera_id)
-        token = client.get_token()
+        # Use ImageServer token (from SOAP Login), NOT OAuth token
+        token = client.get_imageserver_token()
 
         # Generate output filename
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         output_filename = f"export_{timestamp}.mp4"
         output_path = EXPORTS_DIR / output_filename
 

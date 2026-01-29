@@ -1,5 +1,7 @@
 """Milestone XProtect REST API client for authentication and camera listing."""
 
+import re
+import uuid
 import requests
 import urllib3
 from typing import Optional
@@ -16,6 +18,9 @@ class MilestoneClient:
         self.password = MILESTONE_PASSWORD
         self.access_token: Optional[str] = None
         self.token_type: str = "Bearer"
+        # For ImageServer SOAP authentication
+        self.instance_id: str = str(uuid.uuid4())
+        self.imageserver_token: Optional[str] = None
 
     def authenticate(self) -> bool:
         """Authenticate via OAuth and store access token."""
@@ -135,7 +140,62 @@ class MilestoneClient:
         return hostname, port
 
     def get_token(self) -> str:
-        """Return the current access token for ImageServer authentication."""
+        """Return the current OAuth access token for REST API authentication."""
         if not self.access_token:
             raise RuntimeError("Not authenticated. Call authenticate() first.")
         return self.access_token
+
+    def get_imageserver_token(self) -> str:
+        """
+        Get the ImageServer token via SOAP Login.
+
+        The ImageServer protocol requires a different token than the OAuth access token.
+        This token is obtained by calling the ServerCommandService SOAP Login endpoint.
+
+        Returns:
+            str: The ImageServer token for TCP connections
+        """
+        if not self.access_token:
+            raise RuntimeError("Not authenticated. Call authenticate() first.")
+
+        # Get a fresh token via SOAP Login
+        self.imageserver_token = self._soap_login()
+        return self.imageserver_token
+
+    def _soap_login(self) -> str:
+        """
+        Call SOAP Login endpoint to get ImageServer token.
+
+        Uses the OAuth token for authorization and returns the session token
+        that can be used with ImageServer protocol.
+        """
+        url = f"{self.base_url}/ManagementServer/ServerCommandServiceOAuth.svc"
+
+        # Build SOAP envelope
+        soap_envelope = f'''<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/"
+               xmlns:xsc="http://videoos.net/2/XProtectCSServerCommand">
+  <soap:Body>
+    <xsc:Login>
+      <xsc:instanceId>{self.instance_id}</xsc:instanceId>
+      <xsc:currentToken></xsc:currentToken>
+    </xsc:Login>
+  </soap:Body>
+</soap:Envelope>'''
+
+        headers = {
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": "http://videoos.net/2/XProtectCSServerCommand/IServerCommandService/Login",
+            "Authorization": f"{self.token_type} {self.access_token}"
+        }
+
+        response = requests.post(url, data=soap_envelope, headers=headers, verify=False)
+        response.raise_for_status()
+
+        # Parse the token from SOAP response
+        # Look for <Token>...</Token> or <a:Token>...</a:Token> (with namespace prefix)
+        token_match = re.search(r'<(?:a:)?Token>([^<]+)</(?:a:)?Token>', response.text)
+        if not token_match:
+            raise RuntimeError(f"Failed to parse token from SOAP response: {response.text[:500]}")
+
+        return token_match.group(1)
