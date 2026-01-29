@@ -535,9 +535,13 @@ The ImageServer Protocol is a TCP-based protocol for retrieving video from Recor
   <methodname>connect</methodname>
   <username>dummy</username>
   <password>dummy</password>
+  <alwaysstdjpeg>yes</alwaysstdjpeg>
   <connectparam>id={cameraGuid}&amp;connectiontoken={imageserver_token}</connectparam>
 </methodcall>
 ```
+
+**Required Elements**:
+- `<alwaysstdjpeg>yes</alwaysstdjpeg>` - Request JPEG format. Without this, the server returns raw codec data (`application/x-genericbytedata-octet-stream`) which is typically H.264 NAL units, not displayable images.
 
 **Optional Parameters in connectparam**:
 - `streamid={streamGuid}` - For multi-stream cameras
@@ -586,15 +590,19 @@ The ImageServer Protocol is a TCP-based protocol for retrieving video from Recor
 
 **Image Response** (HTTP-style headers + binary):
 ```
+ImageResponse
 Content-type: image/jpeg
 Content-length: 45678
 Current: 1705320000500
 Prev: 1705320000000
 Next: 1705320001000
 RequestId: 2
-
-[Binary JPEG data]
+\r\n\r\n
+[Binary JPEG data - exactly Content-length bytes]
+\r\n\r\n
 ```
+
+> **CRITICAL Implementation Detail**: After reading the binary data (exactly `Content-length` bytes), there is a trailing `\r\n\r\n` terminator that MUST be consumed before sending the next request. Failure to consume this terminator will cause the next `_recv_until(\r\n\r\n)` call to return immediately with empty data, breaking the frame retrieval loop.
 
 ### Query Recording Sequences
 
