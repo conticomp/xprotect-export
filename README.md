@@ -2,8 +2,6 @@
 
 A web-based application for exporting video from Milestone XProtect VMS to MP4 format.
 
-> **Created by [Continental Computers](https://conticomp.com)**
-
 ## Disclaimer
 
 **This software is provided as a reference implementation only.**
